@@ -1,140 +1,186 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, String, DateTime, Float, Text, Boolean, Enum as SQLEnum
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Text
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import sessionmaker, Session, relationship
 from pydantic import BaseModel
 from datetime import datetime, timedelta
-from typing import Optional, List
 import os
-from dotenv import load_dotenv
+import secrets
 import jwt
-import bcrypt
-from twilio.rest import Client
-import random
+from math import radians, cos, sin, asin, sqrt
 
-load_dotenv()
+# ============================================================================
+# ENVIRONMENT VARIABLES
+# ============================================================================
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost/faithmap")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "faithmap-secret-key-production-2026-selvester-bangalore-church-12345678")
+JWT_ALGORITHM = "HS256"
+OTP_EXPIRY_MINUTES = 5
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-JWT_SECRET = os.getenv("JWT_SECRET_KEY", "your-secret-key-default")
-ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
-
+# ============================================================================
+# DATABASE SETUP
+# ============================================================================
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-app = FastAPI(title="FaithMap API", version="1.0.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ============ DATABASE MODELS ============
-
-class Pastor(Base):
-    __tablename__ = "pastors"
-    id = Column(String, primary_key=True)
-    phone_number = Column(String, unique=True, index=True)
-    email = Column(String, unique=True, index=True)
-    full_name = Column(String)
-    password_hash = Column(String)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-class OTPToken(Base):
-    __tablename__ = "otp_tokens"
-    id = Column(String, primary_key=True)
-    phone_number = Column(String, index=True)
-    otp_code = Column(String)
-    expires_at = Column(DateTime)
-    is_verified = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+# ============================================================================
+# DATABASE MODELS
+# ============================================================================
 
 class Church(Base):
     __tablename__ = "churches"
-    id = Column(String, primary_key=True)
-    pastor_id = Column(String, index=True)
-    church_name = Column(String)
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True)
     denomination = Column(String)
-    phone_number = Column(String)
-    email = Column(String)
+    network_church = Column(String)
+    area = Column(String)
+    city = Column(String)
+    full_address = Column(String)
     latitude = Column(Float)
     longitude = Column(Float)
-    address = Column(Text)
-    status = Column(String, default="pending")
-    verified_at = Column(DateTime, nullable=True)
+    phone = Column(String)
+    email = Column(String)
+    website = Column(String, nullable=True)
+    pastor_name = Column(String)
+    member_name = Column(String)
+    member_phone = Column(String)
+    admin_notes = Column(String, nullable=True)
+    status = Column(String, default="submitted")  # submitted, reviewing, verified, rejected
+    rejection_reason = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    verified_at = Column(DateTime, nullable=True)
+    
+    events = relationship("Event", back_populates="church")
+    pastor = relationship("Pastor", uselist=False, back_populates="church")
+
+class Pastor(Base):
+    __tablename__ = "pastors"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True)
+    phone = Column(String)
+    password_hash = Column(String)
+    church_id = Column(Integer, ForeignKey("churches.id"))
+    is_first_login = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    church = relationship("Church", back_populates="pastor")
 
 class Event(Base):
     __tablename__ = "events"
-    id = Column(String, primary_key=True)
-    church_id = Column(String, index=True)
-    event_name = Column(String)
-    event_type = Column(String)
+    
+    id = Column(Integer, primary_key=True, index=True)
+    church_id = Column(Integer, ForeignKey("churches.id"))
+    title = Column(String, index=True)
     description = Column(Text, nullable=True)
     start_time = Column(DateTime)
-    end_time = Column(DateTime, nullable=True)
-    latitude = Column(Float, nullable=True)
-    longitude = Column(Float, nullable=True)
-    location_name = Column(String, nullable=True)
-    status = Column(String, default="active")
+    end_time = Column(DateTime)
+    venue = Column(String)
+    has_refreshments = Column(String, default="no")  # yes, no, n/a
+    notes = Column(String, nullable=True)
+    is_published = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    deleted_at = Column(DateTime, nullable=True)
+    deleted_by = Column(String, nullable=True)
+    
+    church = relationship("Church", back_populates="events")
+    interests = relationship("Interest", back_populates="event")
 
-class Review(Base):
-    __tablename__ = "reviews"
-    id = Column(String, primary_key=True)
-    event_id = Column(String, index=True)
-    church_id = Column(String, index=True)
-    rating = Column(Float)
-    title = Column(String)
-    review_text = Column(Text)
-    is_public = Column(Boolean, default=False)
-    admin_approved = Column(Boolean, default=False)
+class EndUser(Base):
+    __tablename__ = "end_users"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    phone = Column(String, unique=True, index=True)
+    otp = Column(String, nullable=True)
+    otp_expires_at = Column(DateTime, nullable=True)
+    is_verified = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+    last_login = Column(DateTime, nullable=True)
 
+class Interest(Base):
+    __tablename__ = "interests"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(Integer, ForeignKey("events.id"))
+    phone_number = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    event = relationship("Event", back_populates="interests")
+
+# Create all tables
 Base.metadata.create_all(bind=engine)
 
-# ============ SCHEMAS (For validation) ============
+# ============================================================================
+# PYDANTIC SCHEMAS (Request/Response)
+# ============================================================================
 
-class PastorRegister(BaseModel):
-    phone_number: str
-    email: str
-    full_name: str
+class SendOTPRequest(BaseModel):
+    phone: str
 
-class OTPVerify(BaseModel):
-    phone_number: str
-    otp_code: str
-    password: str
+class VerifyOTPRequest(BaseModel):
+    phone: str
+    otp: str
 
-class ChurchRegister(BaseModel):
-    church_name: str
+class EventBase(BaseModel):
+    title: str
+    description: str
+    start_time: datetime
+    end_time: datetime
+    venue: str
+    has_refreshments: str
+
+class EventResponse(EventBase):
+    id: int
+    church_id: int
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class ChurchBase(BaseModel):
+    name: str
     denomination: str
-    phone_number: str
-    email: str
+    area: str
+    city: str
     latitude: float
     longitude: float
-    address: str
 
-class EventCreate(BaseModel):
-    event_name: str
-    event_type: str
-    description: Optional[str] = None
-    start_time: datetime
-    end_time: Optional[datetime] = None
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
-    location_name: Optional[str] = None
+class ChurchDetailResponse(ChurchBase):
+    id: int
+    phone: str
+    email: str
+    website: str
+    pastor_name: str
+    
+    class Config:
+        from_attributes = True
 
-class ReviewCreate(BaseModel):
-    event_id: str
-    rating: float
-    title: str
-    review_text: str
+class EventDetailWithChurch(EventBase):
+    id: int
+    church_id: int
+    has_refreshments: str
+    notes: str
+    church: ChurchDetailResponse
+    
+    class Config:
+        from_attributes = True
 
-# ============ HELPER FUNCTIONS ============
+class InterestRequest(BaseModel):
+    event_id: int
+    phone_number: str
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str
+    message: str
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
 
 def get_db():
     db = SessionLocal()
@@ -143,320 +189,315 @@ def get_db():
     finally:
         db.close()
 
-def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+def generate_otp():
+    """Generate 6-digit OTP"""
+    return str(secrets.randbelow(1000000)).zfill(6)
 
-def verify_password(password: str, hash: str) -> bool:
-    return bcrypt.checkpw(password.encode(), hash.encode())
+def create_access_token(phone: str):
+    """Create JWT token for end user"""
+    payload = {
+        "phone": phone,
+        "exp": datetime.utcnow() + timedelta(days=7)
+    }
+    token = jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    return token
 
-def generate_otp() -> str:
-    return str(random.randint(100000, 999999))
-
-def create_jwt_token(data: dict) -> str:
-    to_encode = data.copy()
-    to_encode["exp"] = datetime.utcnow() + timedelta(days=30)
-    encoded_jwt = jwt.encode(to_encode, JWT_SECRET, algorithm="HS256")
-    return encoded_jwt
-
-def send_otp_sms(phone_number: str, otp_code: str):
-    """Send OTP via Twilio (optional - requires credentials)"""
+def verify_token(token: str) -> str:
+    """Verify JWT token and return phone"""
     try:
-        account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-        auth_token = os.getenv("TWILIO_AUTH_TOKEN")
-        twilio_number = os.getenv("TWILIO_PHONE_NUMBER")
-        
-        if account_sid and auth_token:
-            client = Client(account_sid, auth_token)
-            client.messages.create(
-                body=f"Your FaithMap OTP is {otp_code}. Valid for 10 minutes.",
-                from_=twilio_number,
-                to=phone_number
-            )
-    except:
-        pass
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        phone: str = payload.get("phone")
+        if phone is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return phone
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
-# ============ ROUTES ============
+def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate great circle distance between two points on earth (in km)"""
+    lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+    a = sin(dlat / 2)**2 + cos(lat1) * cos(lat2) * sin(dlon / 2)**2
+    c = 2 * asin(sqrt(a))
+    km = 6371 * c
+    return km
 
-@app.get("/health")
+# ============================================================================
+# FASTAPI APP SETUP
+# ============================================================================
+
+app = FastAPI(title="FaithMap API", version="1.0.0")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ============================================================================
+# HEALTH CHECK
+# ============================================================================
+
+@app.get("/api/health")
 def health_check():
     return {"status": "ok", "service": "FaithMap API"}
 
-# ---- AUTHENTICATION ROUTES ----
+# ============================================================================
+# AUTHENTICATION ENDPOINTS
+# ============================================================================
 
-@app.post("/api/v1/auth/register")
-def register_pastor(request: PastorRegister, db: Session = Depends(get_db)):
-    """Register pastor and send OTP"""
-    existing = db.query(Pastor).filter(Pastor.phone_number == request.phone_number).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Phone already registered")
+@app.post("/api/auth/send-otp")
+def send_otp(request: SendOTPRequest, db: Session = Depends(get_db)):
+    """Send OTP to phone number"""
+    phone = request.phone
     
-    otp_code = generate_otp()
-    otp_expires = datetime.utcnow() + timedelta(minutes=10)
+    if not phone or len(phone) < 10:
+        raise HTTPException(status_code=400, detail="Invalid phone number")
     
-    otp_token = OTPToken(
-        id=str(datetime.utcnow().timestamp()),
-        phone_number=request.phone_number,
-        otp_code=otp_code,
-        expires_at=otp_expires
-    )
-    db.add(otp_token)
+    otp = generate_otp()
+    otp_expires = datetime.utcnow() + timedelta(minutes=OTP_EXPIRY_MINUTES)
+    
+    user = db.query(EndUser).filter(EndUser.phone == phone).first()
+    if user:
+        user.otp = otp
+        user.otp_expires_at = otp_expires
+    else:
+        user = EndUser(phone=phone, otp=otp, otp_expires_at=otp_expires)
+        db.add(user)
+    
     db.commit()
     
-    send_otp_sms(request.phone_number, otp_code)
+    # TODO: Send OTP via Twilio
+    # from twilio.rest import Client
+    # client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    # client.messages.create(to=phone, from_=TWILIO_PHONE, body=f"Your FaithMap OTP is: {otp}")
     
     return {
         "message": "OTP sent to your phone",
-        "phone_number": request.phone_number,
-        "otp": otp_code if ENVIRONMENT == "development" else "***"
+        "otp": otp  # Remove in production
     }
 
-@app.post("/api/v1/auth/verify-otp")
-def verify_otp(request: OTPVerify, db: Session = Depends(get_db)):
-    """Verify OTP and create pastor account"""
-    otp_token = db.query(OTPToken).filter(
-        OTPToken.phone_number == request.phone_number,
-        OTPToken.otp_code == request.otp_code
-    ).first()
+@app.post("/api/auth/verify-otp")
+def verify_otp(request: VerifyOTPRequest, db: Session = Depends(get_db)):
+    """Verify OTP and return JWT token"""
+    phone = request.phone
+    otp = request.otp
     
-    if not otp_token or otp_token.expires_at < datetime.utcnow():
-        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+    user = db.query(EndUser).filter(EndUser.phone == phone).first()
     
-    pastor = db.query(Pastor).filter(Pastor.phone_number == request.phone_number).first()
-    if not pastor:
-        pastor = Pastor(
-            id=str(datetime.utcnow().timestamp()),
-            phone_number=request.phone_number,
-            email="",
-            full_name="",
-            password_hash=hash_password(request.password)
-        )
-        db.add(pastor)
+    if not user:
+        raise HTTPException(status_code=401, detail="Phone not registered")
     
-    otp_token.is_verified = True
+    if not user.otp or user.otp != otp:
+        raise HTTPException(status_code=401, detail="Invalid OTP")
+    
+    if datetime.utcnow() > user.otp_expires_at:
+        raise HTTPException(status_code=401, detail="OTP expired")
+    
+    token = create_access_token(phone)
+    user.is_verified = True
+    user.last_login = datetime.utcnow()
+    user.otp = None
     db.commit()
     
-    token = create_jwt_token({"pastor_id": pastor.id})
-    return {"token": token, "pastor_id": pastor.id, "message": "OTP verified"}
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "message": "Login successful"
+    }
 
-@app.post("/api/v1/auth/login")
-def login(phone_number: str, password: str, db: Session = Depends(get_db)):
-    """Login with phone and password"""
-    pastor = db.query(Pastor).filter(Pastor.phone_number == phone_number).first()
-    
-    if not pastor or not verify_password(password, pastor.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    token = create_jwt_token({"pastor_id": pastor.id})
-    return {"token": token, "pastor_id": pastor.id}
+# ============================================================================
+# EVENTS ENDPOINTS (Portal 1)
+# ============================================================================
 
-# ---- CHURCH ROUTES ----
-
-@app.post("/api/v1/churches/register")
-def register_church(request: ChurchRegister, token: str, db: Session = Depends(get_db)):
-    """Register a church"""
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-        pastor_id = payload.get("pastor_id")
-    except:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    
-    church = Church(
-        id=str(datetime.utcnow().timestamp()),
-        pastor_id=pastor_id,
-        church_name=request.church_name,
-        denomination=request.denomination,
-        phone_number=request.phone_number,
-        email=request.email,
-        latitude=request.latitude,
-        longitude=request.longitude,
-        address=request.address,
-        status="pending"
-    )
-    db.add(church)
-    db.commit()
-    
-    return {"id": church.id, "status": "pending", "message": "Church registered, awaiting admin verification"}
-
-@app.get("/api/v1/churches")
-def get_churches(db: Session = Depends(get_db)):
-    """Get all verified churches"""
-    churches = db.query(Church).filter(Church.status == "verified").all()
-    return churches
-
-@app.get("/api/v1/churches/{church_id}")
-def get_church(church_id: str, db: Session = Depends(get_db)):
-    """Get single church details"""
-    church = db.query(Church).filter(Church.id == church_id).first()
-    if not church:
-        raise HTTPException(status_code=404, detail="Church not found")
-    return church
-
-# ---- EVENT ROUTES ----
-
-@app.post("/api/v1/churches/{church_id}/events")
-def create_event(church_id: str, request: EventCreate, token: str, db: Session = Depends(get_db)):
-    """Create event for a church"""
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-        pastor_id = payload.get("pastor_id")
-    except:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    
-    church = db.query(Church).filter(Church.id == church_id).first()
-    if not church or church.pastor_id != pastor_id:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
-    event = Event(
-        id=str(datetime.utcnow().timestamp()),
-        church_id=church_id,
-        event_name=request.event_name,
-        event_type=request.event_type,
-        description=request.description,
-        start_time=request.start_time,
-        end_time=request.end_time,
-        latitude=request.latitude,
-        longitude=request.longitude,
-        location_name=request.location_name
-    )
-    db.add(event)
-    db.commit()
-    
-    return {"id": event.id, "message": "Event created"}
-
-@app.get("/api/v1/churches/{church_id}/events")
-def get_church_events(church_id: str, db: Session = Depends(get_db)):
-    """Get all events for a church"""
-    events = db.query(Event).filter(Event.church_id == church_id).all()
-    return events
-
-@app.get("/api/v1/search/churches")
-def search_churches(
-    denomination: Optional[str] = None,
-    latitude: Optional[float] = None,
-    longitude: Optional[float] = None,
-    distance_km: Optional[float] = 10,
+@app.get("/api/events")
+def list_events(
+    search: str = None,
+    denomination: str = None,
+    time_period: str = None,
+    latitude: float = None,
+    longitude: float = None,
+    max_distance: float = 25,
     db: Session = Depends(get_db)
 ):
-    """Search churches with filters"""
-    query = db.query(Church).filter(Church.status == "verified")
+    """List events with filters"""
+    now = datetime.utcnow()
+    query = db.query(Event).join(Church).filter(
+        Event.is_published == True,
+        Event.start_time > now,
+        Church.status == "verified",
+        Event.deleted_at == None
+    )
+    
+    if search:
+        search_lower = search.lower()
+        query = query.filter(
+            (Event.title.ilike(f"%{search_lower}%")) |
+            (Church.name.ilike(f"%{search_lower}%"))
+        )
     
     if denomination:
         query = query.filter(Church.denomination == denomination)
     
-    churches = query.all()
+    events = query.all()
     
     if latitude and longitude:
-        from math import radians, cos, sin, asin, sqrt
-        
-        def haversine(lat1, lon1, lat2, lon2):
-            lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
-            dlon = lon2 - lon1
-            dlat = lat2 - lat1
-            a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
-            c = 2 * asin(sqrt(a))
-            km = 6371 * c
-            return km
-        
-        nearby = []
-        for church in churches:
-            if church.latitude and church.longitude:
-                dist = haversine(latitude, longitude, church.latitude, church.longitude)
-                if dist <= distance_km:
-                    nearby.append({"church": church, "distance": dist})
-        
-        nearby.sort(key=lambda x: x["distance"])
-        return [item["church"] for item in nearby]
+        filtered_events = []
+        for event in events:
+            dist = haversine_distance(latitude, longitude, event.church.latitude, event.church.longitude)
+            if dist <= max_distance:
+                filtered_events.append({
+                    "id": event.id,
+                    "title": event.title,
+                    "start_time": event.start_time,
+                    "end_time": event.end_time,
+                    "venue": event.venue,
+                    "has_refreshments": event.has_refreshments,
+                    "church_id": event.church_id,
+                    "church_name": event.church.name,
+                    "area": event.church.area,
+                    "distance_km": round(dist, 2)
+                })
+        return filtered_events
     
-    return churches
+    return [
+        {
+            "id": event.id,
+            "title": event.title,
+            "start_time": event.start_time,
+            "end_time": event.end_time,
+            "venue": event.venue,
+            "has_refreshments": event.has_refreshments,
+            "church_id": event.church_id,
+            "church_name": event.church.name,
+            "area": event.church.area
+        }
+        for event in events
+    ]
 
-# ---- REVIEW ROUTES ----
-
-@app.post("/api/v1/events/{event_id}/reviews")
-def create_review(event_id: str, request: ReviewCreate, db: Session = Depends(get_db)):
-    """Create a review (only visible to admin initially)"""
-    review = Review(
-        id=str(datetime.utcnow().timestamp()),
-        event_id=event_id,
-        church_id=request.event_id,
-        rating=request.rating,
-        title=request.title,
-        review_text=request.review_text,
-        is_public=False,
-        admin_approved=False
-    )
-    db.add(review)
-    db.commit()
+@app.get("/api/events/{event_id}")
+def get_event_detail(event_id: int, db: Session = Depends(get_db)):
+    """Get full event details + church info"""
+    event = db.query(Event).filter(
+        Event.id == event_id,
+        Event.is_published == True,
+        Event.deleted_at == None
+    ).first()
     
-    return {"id": review.id, "message": "Review submitted, pending admin approval"}
-
-@app.get("/api/v1/admin/reviews")
-def get_pending_reviews(token: str, db: Session = Depends(get_db)):
-    """Get all pending reviews (admin only)"""
-    reviews = db.query(Review).filter(Review.admin_approved == False).all()
-    return reviews
-
-@app.put("/api/v1/admin/reviews/{review_id}/approve")
-def approve_review(review_id: str, token: str, db: Session = Depends(get_db)):
-    """Approve a review (admin only)"""
-    review = db.query(Review).filter(Review.id == review_id).first()
-    if not review:
-        raise HTTPException(status_code=404, detail="Review not found")
-    
-    review.admin_approved = True
-    review.is_public = True
-    db.commit()
-    
-    return {"message": "Review approved"}
-
-# ---- ADMIN ROUTES ----
-
-@app.get("/api/v1/admin/churches/pending")
-def get_pending_churches(token: str, db: Session = Depends(get_db)):
-    """Get churches waiting for verification (admin only)"""
-    churches = db.query(Church).filter(Church.status == "pending").all()
-    return churches
-
-@app.put("/api/v1/admin/churches/{church_id}/verify")
-def verify_church(church_id: str, token: str, db: Session = Depends(get_db)):
-    """Verify a church (admin only)"""
-    church = db.query(Church).filter(Church.id == church_id).first()
-    if not church:
-        raise HTTPException(status_code=404, detail="Church not found")
-    
-    church.status = "verified"
-    church.verified_at = datetime.utcnow()
-    db.commit()
-    
-    return {"message": "Church verified"}
-
-@app.delete("/api/v1/admin/churches/{church_id}")
-def delete_church(church_id: str, token: str, db: Session = Depends(get_db)):
-    """Delete a church (admin only)"""
-    church = db.query(Church).filter(Church.id == church_id).first()
-    if not church:
-        raise HTTPException(status_code=404, detail="Church not found")
-    
-    db.delete(church)
-    db.commit()
-    
-    return {"message": "Church deleted"}
-
-@app.get("/api/v1/admin/stats")
-def get_stats(token: str, db: Session = Depends(get_db)):
-    """Get dashboard statistics (admin only)"""
-    total_churches = db.query(Church).count()
-    verified_churches = db.query(Church).filter(Church.status == "verified").count()
-    pending_churches = db.query(Church).filter(Church.status == "pending").count()
-    total_events = db.query(Event).count()
-    pending_reviews = db.query(Review).filter(Review.admin_approved == False).count()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
     
     return {
-        "total_churches": total_churches,
-        "verified_churches": verified_churches,
-        "pending_churches": pending_churches,
-        "total_events": total_events,
-        "pending_reviews": pending_reviews
+        "id": event.id,
+        "title": event.title,
+        "description": event.description,
+        "start_time": event.start_time,
+        "end_time": event.end_time,
+        "venue": event.venue,
+        "has_refreshments": event.has_refreshments,
+        "notes": event.notes,
+        "church": {
+            "id": event.church.id,
+            "name": event.church.name,
+            "denomination": event.church.denomination,
+            "area": event.church.area,
+            "city": event.church.city,
+            "full_address": event.church.full_address,
+            "latitude": event.church.latitude,
+            "longitude": event.church.longitude,
+            "phone": event.church.phone,
+            "email": event.church.email,
+            "website": event.church.website,
+            "pastor_name": event.church.pastor_name
+        }
     }
+
+@app.get("/api/churches/{church_id}")
+def get_church_detail(church_id: int, db: Session = Depends(get_db)):
+    """Get church details + all upcoming events"""
+    church = db.query(Church).filter(
+        Church.id == church_id,
+        Church.status == "verified"
+    ).first()
+    
+    if not church:
+        raise HTTPException(status_code=404, detail="Church not found")
+    
+    now = datetime.utcnow()
+    events = db.query(Event).filter(
+        Event.church_id == church_id,
+        Event.is_published == True,
+        Event.start_time > now,
+        Event.deleted_at == None
+    ).order_by(Event.start_time).all()
+    
+    return {
+        "id": church.id,
+        "name": church.name,
+        "denomination": church.denomination,
+        "network_church": church.network_church,
+        "area": church.area,
+        "city": church.city,
+        "full_address": church.full_address,
+        "latitude": church.latitude,
+        "longitude": church.longitude,
+        "phone": church.phone,
+        "email": church.email,
+        "website": church.website,
+        "pastor_name": church.pastor_name,
+        "events": [
+            {
+                "id": event.id,
+                "title": event.title,
+                "description": event.description,
+                "start_time": event.start_time,
+                "end_time": event.end_time,
+                "venue": event.venue,
+                "has_refreshments": event.has_refreshments,
+                "notes": event.notes
+            }
+            for event in events
+        ]
+    }
+
+# ============================================================================
+# INTERESTS ENDPOINT
+# ============================================================================
+
+@app.post("/api/interests")
+def record_interest(request: InterestRequest, db: Session = Depends(get_db)):
+    """Record user interest in an event"""
+    event = db.query(Event).filter(Event.id == request.event_id).first()
+    
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    existing = db.query(Interest).filter(
+        Interest.event_id == request.event_id,
+        Interest.phone_number == request.phone_number
+    ).first()
+    
+    if existing:
+        return {"message": "You already expressed interest in this event"}
+    
+    interest = Interest(event_id=request.event_id, phone_number=request.phone_number)
+    db.add(interest)
+    db.commit()
+    
+    # TODO: Send notification to pastor email
+    # TODO: Send WhatsApp/SMS to pastor
+    
+    return {"message": "Interest recorded successfully", "event_id": request.event_id}
+
+# ============================================================================
+# RUN
+# ============================================================================
 
 if __name__ == "__main__":
     import uvicorn
