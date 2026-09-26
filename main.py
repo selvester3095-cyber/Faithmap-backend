@@ -111,7 +111,8 @@ class Interest(Base):
     
     event = relationship("Event", back_populates="interests")
 
-# Create all tables
+# Drop all tables and recreate (clean slate on startup)
+Base.metadata.drop_all(bind=engine)
 Base.metadata.create_all(bind=engine)
 
 # ============================================================================
