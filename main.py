@@ -10,6 +10,9 @@ import secrets
 import jwt
 from math import radians, cos, sin, asin, sqrt
 
+# ✅ ADD CHURCH PORTAL ROUTERS IMPORT
+from routers import church_auth, church_events, church_profile, church_settings
+
 # ============================================================================
 # ENVIRONMENT VARIABLES
 # ============================================================================
@@ -31,7 +34,7 @@ Base = declarative_base()
 
 class Church(Base):
     __tablename__ = "churches"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
     denomination = Column(String)
@@ -52,13 +55,13 @@ class Church(Base):
     rejection_reason = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     verified_at = Column(DateTime, nullable=True)
-    
+
     events = relationship("Event", back_populates="church")
     pastor = relationship("Pastor", uselist=False, back_populates="church")
 
 class Pastor(Base):
     __tablename__ = "pastors"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True)
     phone = Column(String)
@@ -66,12 +69,12 @@ class Pastor(Base):
     church_id = Column(Integer, ForeignKey("churches.id"))
     is_first_login = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     church = relationship("Church", back_populates="pastor")
 
 class Event(Base):
     __tablename__ = "events"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     church_id = Column(Integer, ForeignKey("churches.id"))
     title = Column(String, index=True)
@@ -86,13 +89,13 @@ class Event(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
     deleted_at = Column(DateTime, nullable=True)
     deleted_by = Column(String, nullable=True)
-    
+
     church = relationship("Church", back_populates="events")
     interests = relationship("Interest", back_populates="event")
 
 class EndUser(Base):
     __tablename__ = "end_users"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     phone = Column(String, unique=True, index=True)
     otp = Column(String, nullable=True)
@@ -103,13 +106,38 @@ class EndUser(Base):
 
 class Interest(Base):
     __tablename__ = "interests"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     event_id = Column(Integer, ForeignKey("events.id"))
     phone_number = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     event = relationship("Event", back_populates="interests")
+
+# ✅ ADD CHURCH PORTAL MODELS
+class ChurchSettings(Base):
+    __tablename__ = "church_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    church_id = Column(Integer, ForeignKey("churches.id"))
+    email_on_interest = Column(Boolean, default=True)
+    daily_digest = Column(Boolean, default=True)
+    event_reminders = Column(Boolean, default=False)
+    reminder_hours_before = Column(Integer, default=24)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class EditRequest(Base):
+    __tablename__ = "edit_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    church_id = Column(Integer, ForeignKey("churches.id"))
+    message = Column(String)
+    status = Column(String, default="pending")
+    response_message = Column(String, nullable=True)
+    processed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 # Drop all tables and recreate (clean slate on startup)
 Base.metadata.drop_all(bind=engine)
@@ -138,7 +166,7 @@ class EventResponse(EventBase):
     id: int
     church_id: int
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 
@@ -156,7 +184,7 @@ class ChurchDetailResponse(ChurchBase):
     email: str
     website: str
     pastor_name: str
-    
+
     class Config:
         from_attributes = True
 
@@ -166,7 +194,7 @@ class EventDetailWithChurch(EventBase):
     has_refreshments: str
     notes: str
     church: ChurchDetailResponse
-    
+
     class Config:
         from_attributes = True
 
@@ -257,13 +285,13 @@ def health_check():
 def send_otp(request: SendOTPRequest, db: Session = Depends(get_db)):
     """Send OTP to phone number"""
     phone = request.phone
-    
+
     if not phone or len(phone) < 10:
         raise HTTPException(status_code=400, detail="Invalid phone number")
-    
+
     otp = generate_otp()
     otp_expires = datetime.utcnow() + timedelta(minutes=OTP_EXPIRY_MINUTES)
-    
+
     user = db.query(EndUser).filter(EndUser.phone == phone).first()
     if user:
         user.otp = otp
@@ -271,14 +299,14 @@ def send_otp(request: SendOTPRequest, db: Session = Depends(get_db)):
     else:
         user = EndUser(phone=phone, otp=otp, otp_expires_at=otp_expires)
         db.add(user)
-    
+
     db.commit()
-    
+
     # TODO: Send OTP via Twilio
     # from twilio.rest import Client
     # client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     # client.messages.create(to=phone, from_=TWILIO_PHONE, body=f"Your FaithMap OTP is: {otp}")
-    
+
     return {
         "message": "OTP sent to your phone",
         "otp": otp  # Remove in production
@@ -289,24 +317,24 @@ def verify_otp(request: VerifyOTPRequest, db: Session = Depends(get_db)):
     """Verify OTP and return JWT token"""
     phone = request.phone
     otp = request.otp
-    
+
     user = db.query(EndUser).filter(EndUser.phone == phone).first()
-    
+
     if not user:
         raise HTTPException(status_code=401, detail="Phone not registered")
-    
+
     if not user.otp or user.otp != otp:
         raise HTTPException(status_code=401, detail="Invalid OTP")
-    
+
     if datetime.utcnow() > user.otp_expires_at:
         raise HTTPException(status_code=401, detail="OTP expired")
-    
+
     token = create_access_token(phone)
     user.is_verified = True
     user.last_login = datetime.utcnow()
     user.otp = None
     db.commit()
-    
+
     return {
         "access_token": token,
         "token_type": "bearer",
@@ -335,19 +363,19 @@ def list_events(
         Church.status == "verified",
         Event.deleted_at == None
     )
-    
+
     if search:
         search_lower = search.lower()
         query = query.filter(
             (Event.title.ilike(f"%{search_lower}%")) |
             (Church.name.ilike(f"%{search_lower}%"))
         )
-    
+
     if denomination:
         query = query.filter(Church.denomination == denomination)
-    
+
     events = query.all()
-    
+
     if latitude and longitude:
         filtered_events = []
         for event in events:
@@ -366,7 +394,7 @@ def list_events(
                     "distance_km": round(dist, 2)
                 })
         return filtered_events
-    
+
     return [
         {
             "id": event.id,
@@ -390,10 +418,10 @@ def get_event_detail(event_id: int, db: Session = Depends(get_db)):
         Event.is_published == True,
         Event.deleted_at == None
     ).first()
-    
+
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    
+
     return {
         "id": event.id,
         "title": event.title,
@@ -426,10 +454,10 @@ def get_church_detail(church_id: int, db: Session = Depends(get_db)):
         Church.id == church_id,
         Church.status == "verified"
     ).first()
-    
+
     if not church:
         raise HTTPException(status_code=404, detail="Church not found")
-    
+
     now = datetime.utcnow()
     events = db.query(Event).filter(
         Event.church_id == church_id,
@@ -437,7 +465,7 @@ def get_church_detail(church_id: int, db: Session = Depends(get_db)):
         Event.start_time > now,
         Event.deleted_at == None
     ).order_by(Event.start_time).all()
-    
+
     return {
         "id": church.id,
         "name": church.name,
@@ -475,26 +503,32 @@ def get_church_detail(church_id: int, db: Session = Depends(get_db)):
 def record_interest(request: InterestRequest, db: Session = Depends(get_db)):
     """Record user interest in an event"""
     event = db.query(Event).filter(Event.id == request.event_id).first()
-    
+
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    
+
     existing = db.query(Interest).filter(
         Interest.event_id == request.event_id,
         Interest.phone_number == request.phone_number
     ).first()
-    
+
     if existing:
         return {"message": "You already expressed interest in this event"}
-    
+
     interest = Interest(event_id=request.event_id, phone_number=request.phone_number)
     db.add(interest)
     db.commit()
-    
+
     # TODO: Send notification to pastor email
     # TODO: Send WhatsApp/SMS to pastor
-    
+
     return {"message": "Interest recorded successfully", "event_id": request.event_id}
+
+# ✅ ADD CHURCH PORTAL ROUTERS
+app.include_router(church_auth.router)
+app.include_router(church_events.router)
+app.include_router(church_profile.router)
+app.include_router(church_settings.router)
 
 # ============================================================================
 # RUN
