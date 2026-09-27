@@ -1,253 +1,222 @@
-from __future__ import annotations
-from typing import Optional
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, status
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from datetime import datetime
-from typing import List, Optional
+from database import SessionLocal
+from models import Event
 
 router = APIRouter(prefix="/api/church", tags=["church-events"])
 
-# ============ Models ============
+# ============== Models ==============
 class EventCreate(BaseModel):
     title: str
-    description: str
+    description: str | None = None
     start_time: datetime
     end_time: datetime
-    venue: str
-    refreshments: bool = False
-    notes: Optional[str] = None
-    is_published: bool = False
+    location: str | None = None
+    category: str | None = None
 
 class EventUpdate(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    start_time: Optional[datetime] = None
-    end_time: Optional[datetime] = None
-    venue: Optional[str] = None
-    refreshments: Optional[bool] = None
-    notes: Optional[str] = None
-    is_published: Optional[bool] = None
+    title: str | None = None
+    description: str | None = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    location: str | None = None
+    category: str | None = None
+    is_published: bool | None = None
 
 class EventResponse(BaseModel):
     id: int
+    church_id: int
     title: str
-    description: str
+    description: str | None
     start_time: datetime
     end_time: datetime
-    venue: str
-    refreshments: bool
-    notes: Optional[str]
+    location: str | None
+    category: str | None
     is_published: bool
-    church_id: int
-    interest_count: int
+    interested_count: int
     created_at: datetime
-    updated_at: datetime
+    updated_at: datetime | None
 
     class Config:
         from_attributes = True
 
-class DeleteEventRequest(BaseModel):
-    reason: str
+# ============== Helper Functions ==============
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-# ============ Routes ============
-
-@router.get("/events", response_model=List[EventResponse])
-def list_events(
-    church_id: int = Depends(get_current_church),
-    skip: int = Query(0, ge=0),
-    limit: int = Query(10, ge=1, le=100),
-    search: Optional[str] = None,
-    sort_by: str = Query("date", enum=["date", "name"]),
-    db: Session = Depends()
-):
-    """
-    Get all events for a church with pagination and search
-    """
-    from main import Event
-
-    query = db.query(Event).filter(Event.church_id == church_id)
-
-    # Search by title
-    if search:
-        query = query.filter(Event.title.ilike(f"%{search}%"))
-
-    # Sort
-    if sort_by == "date":
-        query = query.order_by(Event.start_time.desc())
-    elif sort_by == "name":
-        query = query.order_by(Event.title.asc())
-
-    events = query.offset(skip).limit(limit).all()
-    return events
-
-
-@router.post("/events", response_model=EventResponse)
-def create_event(
-    request: EventCreate,
-    church_id: int = Depends(get_current_church),
-    db: Session = Depends()
-):
-    """
-    Create a new event
-    """
-    from main import Event
-
+# ============== Routes ==============
+@router.post("/events", response_model=dict)
+def create_event(church_id: int, request: EventCreate, db: Session = None):
+    """Create a new event"""
+    if db is None:
+        db = SessionLocal()
+    
+    # Validate description length
+    if request.description and len(request.description) > 100:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Description must be 100 characters or less")
+    
     # Validate times
     if request.start_time >= request.end_time:
-        raise HTTPException(status_code=400, detail="Start time must be before end time")
-
-    # Validate description length
-    if len(request.description) > 100:
-        raise HTTPException(status_code=400, detail="Description must be 100 characters or less")
-
-    event = Event(
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Start time must be before end time")
+    
+    # Create event
+    new_event = Event(
+        church_id=church_id,
         title=request.title,
         description=request.description,
         start_time=request.start_time,
         end_time=request.end_time,
-        venue=request.venue,
-        refreshments=request.refreshments,
-        notes=request.notes,
-        is_published=request.is_published,
-        church_id=church_id
+        location=request.location,
+        category=request.category,
+        is_published=False
     )
-
-    db.add(event)
+    
+    db.add(new_event)
     db.commit()
-    db.refresh(event)
-
-    return event
-
+    db.refresh(new_event)
+    
+    return {
+        "message": "Event created successfully",
+        "event_id": new_event.id
+    }
 
 @router.get("/events/{event_id}", response_model=EventResponse)
-def get_event(
-    event_id: int,
-    church_id: int = Depends(get_current_church),
-    db: Session = Depends()
-):
-    """
-    Get a specific event
-    """
-    from main import Event
-
-    event = db.query(Event).filter(
-        Event.id == event_id,
-        Event.church_id == church_id
-    ).first()
-
+def get_event(event_id: int, db: Session = None):
+    """Get event by ID"""
+    if db is None:
+        db = SessionLocal()
+    
+    event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+    
     return event
 
-
-@router.put("/events/{event_id}", response_model=EventResponse)
-def update_event(
-    event_id: int,
-    request: EventUpdate,
-    church_id: int = Depends(get_current_church),
-    db: Session = Depends()
+@router.get("/events", response_model=dict)
+def list_events(
+    church_id: int,
+    skip: int = 0,
+    limit: int = 10,
+    search: str | None = None,
+    sort_by: str = "created_at",
+    db: Session = None
 ):
-    """
-    Update an event (all fields editable)
-    """
-    from main import Event
+    """List church events with pagination and search"""
+    if db is None:
+        db = SessionLocal()
+    
+    query = db.query(Event).filter(Event.church_id == church_id)
+    
+    # Search by title
+    if search:
+        query = query.filter(Event.title.ilike(f"%{search}%"))
+    
+    # Sorting
+    if sort_by == "start_time":
+        query = query.order_by(Event.start_time.desc())
+    else:
+        query = query.order_by(Event.created_at.desc())
+    
+    total = query.count()
+    events = query.offset(skip).limit(limit).all()
+    
+    return {
+        "total": total,
+        "skip": skip,
+        "limit": limit,
+        "events": events
+    }
 
-    event = db.query(Event).filter(
-        Event.id == event_id,
-        Event.church_id == church_id
-    ).first()
-
+@router.put("/events/{event_id}", response_model=dict)
+def update_event(event_id: int, request: EventUpdate, db: Session = None):
+    """Update event"""
+    if db is None:
+        db = SessionLocal()
+    
+    event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-
-    # Validate description if provided
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+    
+    # Validate description length if provided
     if request.description and len(request.description) > 100:
-        raise HTTPException(status_code=400, detail="Description must be 100 characters or less")
-
-    # Validate times if both provided
-    if request.start_time and request.end_time:
-        if request.start_time >= request.end_time:
-            raise HTTPException(status_code=400, detail="Start time must be before end time")
-
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Description must be 100 characters or less")
+    
+    # Validate times if provided
+    start_time = request.start_time or event.start_time
+    end_time = request.end_time or event.end_time
+    if start_time >= end_time:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Start time must be before end time")
+    
     # Update fields
-    update_data = request.dict(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(event, field, value)
-
+    if request.title:
+        event.title = request.title
+    if request.description is not None:
+        event.description = request.description
+    if request.start_time:
+        event.start_time = request.start_time
+    if request.end_time:
+        event.end_time = request.end_time
+    if request.location is not None:
+        event.location = request.location
+    if request.category is not None:
+        event.category = request.category
+    if request.is_published is not None:
+        event.is_published = request.is_published
+    
     event.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(event)
+    
+    return {"message": "Event updated successfully"}
 
-    return event
-
-
-@router.delete("/events/{event_id}")
-def delete_event(
-    event_id: int,
-    request: DeleteEventRequest,
-    church_id: int = Depends(get_current_church),
-    db: Session = Depends()
-):
-    """
-    Delete an event with required reason
-    """
-    from main import Event
-
-    if not request.reason or len(request.reason.strip()) == 0:
-        raise HTTPException(status_code=400, detail="Reason for deletion is required")
-
-    event = db.query(Event).filter(
-        Event.id == event_id,
-        Event.church_id == church_id
-    ).first()
-
+@router.delete("/events/{event_id}", response_model=dict)
+def delete_event(event_id: int, db: Session = None):
+    """Delete event"""
+    if db is None:
+        db = SessionLocal()
+    
+    event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-
-    # Log deletion reason (optional - could store in audit table)
-    # audit_log = AuditLog(church_id=church_id, event_id=event_id, action="delete", reason=request.reason)
-    # db.add(audit_log)
-
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+    
     db.delete(event)
     db.commit()
+    
+    return {"message": "Event deleted successfully"}
 
-    return {"message": "Event deleted successfully", "reason": request.reason}
-
-
-@router.get("/events/{event_id}/interests")
-def get_event_interests(
-    event_id: int,
-    church_id: int = Depends(get_current_church),
-    db: Session = Depends()
-):
-    """
-    Get list of people interested in an event
-    Admin only - shows who clicked "I'm Interested"
-    """
-    from main import Event, Interest
-
-    event = db.query(Event).filter(
-        Event.id == event_id,
-        Event.church_id == church_id
-    ).first()
-
+@router.post("/events/{event_id}/interested", response_model=dict)
+def mark_interested(event_id: int, user_id: int, db: Session = None):
+    """Mark event as interested"""
+    if db is None:
+        db = SessionLocal()
+    
+    event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+    
+    # Add user to interested list (simplified - in production use a junction table)
+    event.interested_count += 1
+    db.commit()
+    
+    return {"message": "Marked as interested"}
 
-    interests = db.query(Interest).filter(Interest.event_id == event_id).all()
-
-    return {
-        "event_id": event_id,
-        "event_title": event.title,
-        "total_interests": len(interests),
-        "interests": interests
-    }
-
-
-# ============ Helper Functions ============
-def get_current_church(token: str):
-    """Verify JWT token and return church_id"""
-    from church_auth import get_current_church as auth_get_current_church
-    return auth_get_current_church(token)
+@router.post("/events/{event_id}/publish", response_model=dict)
+def publish_event(event_id: int, db: Session = None):
+    """Publish event"""
+    if db is None:
+        db = SessionLocal()
+    
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+    
+    event.is_published = True
+    db.commit()
+    
+    return {"message": "Event published successfully"}
