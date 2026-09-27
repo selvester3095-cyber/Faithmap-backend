@@ -1,104 +1,96 @@
-from __future__ import annotations
-from typing import Optional
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, status
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
+from database import SessionLocal
+from models import ChurchSettings
 
 router = APIRouter(prefix="/api/church", tags=["church-settings"])
 
-# ============ Models ============
+# ============== Models ==============
 class NotificationPreferences(BaseModel):
     email_on_interest: bool = True
-    daily_digest: bool = True
-    event_reminders: bool = False
+    daily_digest: bool = False
+    event_reminders: bool = True
     reminder_hours_before: int = 24
 
-class NotificationResponse(BaseModel):
+class NotificationPreferencesResponse(BaseModel):
+    id: int
+    church_id: int
     email_on_interest: bool
     daily_digest: bool
     event_reminders: bool
     reminder_hours_before: int
-    message: str
 
-# ============ Routes ============
+    class Config:
+        from_attributes = True
 
-@router.get("/settings/notifications", response_model=NotificationResponse)
-def get_notification_settings(
-    church_id: int = Depends(get_current_church),
-    db: Session = Depends()
-):
-    """
-    Get notification preferences for a church
-    """
-    from main import Church, ChurchSettings
+# ============== Helper Functions ==============
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-    church = db.query(Church).filter(Church.id == church_id).first()
-    if not church:
-        raise HTTPException(status_code=404, detail="Church not found")
-
-    # Get or create settings
-    settings = db.query(ChurchSettings).filter(
-        ChurchSettings.church_id == church_id
-    ).first()
-
+# ============== Routes ==============
+@router.get("/settings/{church_id}/notifications", response_model=NotificationPreferencesResponse)
+def get_notification_settings(church_id: int, db: Session = None):
+    """Get notification preferences for church"""
+    if db is None:
+        db = SessionLocal()
+    
+    settings = db.query(ChurchSettings).filter(ChurchSettings.church_id == church_id).first()
+    
     if not settings:
-        # Create default settings
+        # Return default settings if not exists
+        return {
+            "id": 0,
+            "church_id": church_id,
+            "email_on_interest": True,
+            "daily_digest": False,
+            "event_reminders": True,
+            "reminder_hours_before": 24
+        }
+    
+    return settings
+
+@router.put("/settings/{church_id}/notifications", response_model=dict)
+def update_notification_settings(church_id: int, request: NotificationPreferences, db: Session = None):
+    """Update notification preferences"""
+    if db is None:
+        db = SessionLocal()
+    
+    # Validate reminder hours
+    if request.reminder_hours_before < 1 or request.reminder_hours_before > 720:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Reminder hours must be between 1 and 720"
+        )
+    
+    # Get or create settings
+    settings = db.query(ChurchSettings).filter(ChurchSettings.church_id == church_id).first()
+    
+    if not settings:
         settings = ChurchSettings(
             church_id=church_id,
-            email_on_interest=True,
-            daily_digest=True,
-            event_reminders=False,
-            reminder_hours_before=24
+            email_on_interest=request.email_on_interest,
+            daily_digest=request.daily_digest,
+            event_reminders=request.event_reminders,
+            reminder_hours_before=request.reminder_hours_before
         )
         db.add(settings)
-        db.commit()
-        db.refresh(settings)
-
-    return NotificationResponse(
-        email_on_interest=settings.email_on_interest,
-        daily_digest=settings.daily_digest,
-        event_reminders=settings.event_reminders,
-        reminder_hours_before=settings.reminder_hours_before,
-        message="Notification preferences retrieved"
-    )
-
-
-@router.put("/settings/notifications")
-def update_notification_settings(
-    preferences: NotificationPreferences,
-    church_id: int = Depends(get_current_church),
-    db: Session = Depends()
-):
-    """
-    Update notification preferences
-    """
-    from main import Church, ChurchSettings
-
-    church = db.query(Church).filter(Church.id == church_id).first()
-    if not church:
-        raise HTTPException(status_code=404, detail="Church not found")
-
-    # Get or create settings
-    settings = db.query(ChurchSettings).filter(
-        ChurchSettings.church_id == church_id
-    ).first()
-
-    if not settings:
-        settings = ChurchSettings(church_id=church_id)
-
-    # Update preferences
-    settings.email_on_interest = preferences.email_on_interest
-    settings.daily_digest = preferences.daily_digest
-    settings.event_reminders = preferences.event_reminders
-    settings.reminder_hours_before = preferences.reminder_hours_before
-
-    db.add(settings)
+    else:
+        settings.email_on_interest = request.email_on_interest
+        settings.daily_digest = request.daily_digest
+        settings.event_reminders = request.event_reminders
+        settings.reminder_hours_before = request.reminder_hours_before
+    
     db.commit()
     db.refresh(settings)
-
+    
     return {
-        "message": "Notification preferences updated successfully",
-        "preferences": {
+        "message": "Notification settings updated successfully",
+        "settings": {
             "email_on_interest": settings.email_on_interest,
             "daily_digest": settings.daily_digest,
             "event_reminders": settings.event_reminders,
@@ -106,34 +98,53 @@ def update_notification_settings(
         }
     }
 
+@router.post("/settings/{church_id}/notifications/reset", response_model=dict)
+def reset_notification_settings(church_id: int, db: Session = None):
+    """Reset notification settings to defaults"""
+    if db is None:
+        db = SessionLocal()
+    
+    settings = db.query(ChurchSettings).filter(ChurchSettings.church_id == church_id).first()
+    
+    if settings:
+        settings.email_on_interest = True
+        settings.daily_digest = False
+        settings.event_reminders = True
+        settings.reminder_hours_before = 24
+        db.commit()
+    
+    return {
+        "message": "Notification settings reset to defaults",
+        "settings": {
+            "email_on_interest": True,
+            "daily_digest": False,
+            "event_reminders": True,
+            "reminder_hours_before": 24
+        }
+    }
 
-@router.get("/settings/summary")
-def get_all_settings(
-    church_id: int = Depends(get_current_church),
-    db: Session = Depends()
-):
-    """
-    Get all settings for a church
-    """
-    from main import Church, ChurchSettings
-
-    church = db.query(Church).filter(Church.id == church_id).first()
-    if not church:
-        raise HTTPException(status_code=404, detail="Church not found")
-
-    settings = db.query(ChurchSettings).filter(
-        ChurchSettings.church_id == church_id
-    ).first()
-
+@router.get("/settings/{church_id}/all", response_model=dict)
+def get_all_settings(church_id: int, db: Session = None):
+    """Get all church settings"""
+    if db is None:
+        db = SessionLocal()
+    
+    settings = db.query(ChurchSettings).filter(ChurchSettings.church_id == church_id).first()
+    
     if not settings:
-        settings = ChurchSettings(church_id=church_id)
+        settings = ChurchSettings(
+            church_id=church_id,
+            email_on_interest=True,
+            daily_digest=False,
+            event_reminders=True,
+            reminder_hours_before=24
+        )
         db.add(settings)
         db.commit()
         db.refresh(settings)
-
+    
     return {
-        "church_id": church_id,
-        "church_name": church.name,
+        "church_id": settings.church_id,
         "notifications": {
             "email_on_interest": settings.email_on_interest,
             "daily_digest": settings.daily_digest,
@@ -141,10 +152,3 @@ def get_all_settings(
             "reminder_hours_before": settings.reminder_hours_before
         }
     }
-
-
-# ============ Helper Functions ============
-def get_current_church(token: str):
-    """Verify JWT token and return church_id"""
-    from church_auth import get_current_church as auth_get_current_church
-    return auth_get_current_church(token)
