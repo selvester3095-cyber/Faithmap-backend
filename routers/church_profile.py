@@ -1,195 +1,210 @@
-from __future__ import annotations
-from typing import Optional
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, status
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional
+from database import SessionLocal
+from models import Church, EditRequest
 
 router = APIRouter(prefix="/api/church", tags=["church-profile"])
 
-# ============ Models ============
-class ChurchProfileResponse(BaseModel):
+# ============== Models ==============
+class EditRequestCreate(BaseModel):
+    field_name: str
+    new_value: str
+    reason: str | None = None
+
+class EditRequestResponse(BaseModel):
     id: int
-    name: str
-    denomination: str
-    area: str
-    city: str
-    phone: str
-    email: str
-    website: Optional[str]
-    address: Optional[str]
-    latitude: Optional[float]
-    longitude: Optional[float]
-    created_at: datetime
-    updated_at: datetime
+    church_id: int
+    field_name: str
+    new_value: str
+    reason: str | None
+    status: str  # pending, approved, rejected
+    requested_at: datetime
+    responded_at: datetime | None
 
     class Config:
         from_attributes = True
 
-class EditRequestMessage(BaseModel):
-    message: str
+class ChurchProfileResponse(BaseModel):
+    id: int
+    church_name: str
+    email: str
+    phone: str | None
+    location: str | None
+    description: str | None
+    image_url: str | None
+    created_at: datetime
 
-class EditRequestResponse(BaseModel):
-    message: str
-    admin_notified: bool
-    request_id: int
+    class Config:
+        from_attributes = True
 
-# ============ Routes ============
+# ============== Helper Functions ==============
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-@router.get("/profile", response_model=ChurchProfileResponse)
-def get_church_profile(
-    church_id: int = Depends(get_current_church),
-    db: Session = Depends()
-):
-    """
-    Get church profile (Read-only for church users)
-    Shows: Name, Denomination, Area, City, Phone, Email, Website
-    """
-    from main import Church
-
+# ============== Routes ==============
+@router.get("/profile/{church_id}", response_model=ChurchProfileResponse)
+def get_church_profile(church_id: int, db: Session = None):
+    """Get church profile (read-only)"""
+    if db is None:
+        db = SessionLocal()
+    
     church = db.query(Church).filter(Church.id == church_id).first()
-
     if not church:
-        raise HTTPException(status_code=404, detail="Church not found")
-
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Church not found")
+    
     return church
 
-
-@router.post("/profile/request-edit")
-def request_profile_edit(
-    request: EditRequestMessage,
-    church_id: int = Depends(get_current_church),
-    db: Session = Depends()
-):
-    """
-    Send edit request to admin
-    Church can request to edit their profile details
-    """
-    from main import Church, EditRequest
-
+@router.post("/profile/{church_id}/request-edit", response_model=dict)
+def request_edit(church_id: int, request: EditRequestCreate, db: Session = None):
+    """Request edit to church profile"""
+    if db is None:
+        db = SessionLocal()
+    
+    # Verify church exists
     church = db.query(Church).filter(Church.id == church_id).first()
     if not church:
-        raise HTTPException(status_code=404, detail="Church not found")
-
-    if not request.message or len(request.message.strip()) == 0:
-        raise HTTPException(status_code=400, detail="Message is required")
-
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Church not found")
+    
+    # Check if pending request already exists for this field
+    existing = db.query(EditRequest).filter(
+        EditRequest.church_id == church_id,
+        EditRequest.field_name == request.field_name,
+        EditRequest.status == "pending"
+    ).first()
+    
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Pending request already exists for this field"
+        )
+    
     # Create edit request
-    edit_request = EditRequest(
+    new_request = EditRequest(
         church_id=church_id,
-        message=request.message,
+        field_name=request.field_name,
+        new_value=request.new_value,
+        reason=request.reason,
         status="pending",
-        created_at=datetime.utcnow()
+        requested_at=datetime.utcnow()
     )
-
-    db.add(edit_request)
+    
+    db.add(new_request)
     db.commit()
-    db.refresh(edit_request)
-
-    return EditRequestResponse(
-        message="Edit request sent to admin successfully",
-        admin_notified=True,
-        request_id=edit_request.id
-    )
-
-
-@router.get("/profile/edit-requests")
-def get_edit_requests(
-    church_id: int = Depends(get_current_church),
-    db: Session = Depends()
-):
-    """
-    Get all edit requests for a church
-    """
-    from main import EditRequest
-
-    requests = db.query(EditRequest).filter(
-        EditRequest.church_id == church_id
-    ).order_by(EditRequest.created_at.desc()).all()
-
+    db.refresh(new_request)
+    
     return {
-        "church_id": church_id,
-        "total_requests": len(requests),
+        "message": "Edit request submitted",
+        "request_id": new_request.id
+    }
+
+@router.get("/profile/{church_id}/edit-requests", response_model=dict)
+def get_edit_requests(church_id: int, status_filter: str | None = None, db: Session = None):
+    """Get edit requests for church"""
+    if db is None:
+        db = SessionLocal()
+    
+    # Verify church exists
+    church = db.query(Church).filter(Church.id == church_id).first()
+    if not church:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Church not found")
+    
+    query = db.query(EditRequest).filter(EditRequest.church_id == church_id)
+    
+    if status_filter:
+        query = query.filter(EditRequest.status == status_filter)
+    
+    requests = query.all()
+    
+    return {
+        "total": len(requests),
         "requests": requests
     }
 
-
-# ============ Admin-Only Routes (for future) ============
-
-@router.put("/admin/profile/{church_id}")
-def admin_update_church_profile(
-    church_id: int,
-    updates: dict,
-    admin_id: int = Depends(get_current_admin),
-    db: Session = Depends()
-):
-    """
-    Admin can update church profile
-    """
-    from main import Church
-
-    church = db.query(Church).filter(Church.id == church_id).first()
-    if not church:
-        raise HTTPException(status_code=404, detail="Church not found")
-
-    # Allowed fields for admin to update
-    allowed_fields = ['name', 'denomination', 'area', 'city', 'phone', 'email', 'website', 'address', 'latitude', 'longitude']
-
-    for field, value in updates.items():
-        if field in allowed_fields:
-            setattr(church, field, value)
-
-    church.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(church)
-
-    return {
-        "message": "Church profile updated successfully",
-        "church": church
-    }
-
-
-@router.put("/admin/edit-requests/{request_id}")
-def approve_edit_request(
-    request_id: int,
-    action: str,  # 'approve' or 'reject'
-    response_message: Optional[str] = None,
-    admin_id: int = Depends(get_current_admin),
-    db: Session = Depends()
-):
-    """
-    Admin approves or rejects edit requests
-    """
-    from main import EditRequest
-
-    if action not in ['approve', 'reject']:
-        raise HTTPException(status_code=400, detail="Action must be 'approve' or 'reject'")
-
-    edit_request = db.query(EditRequest).filter(EditRequest.id == request_id).first()
+@router.get("/profile/{church_id}/edit-requests/{request_id}", response_model=EditRequestResponse)
+def get_edit_request(church_id: int, request_id: int, db: Session = None):
+    """Get specific edit request"""
+    if db is None:
+        db = SessionLocal()
+    
+    edit_request = db.query(EditRequest).filter(
+        EditRequest.id == request_id,
+        EditRequest.church_id == church_id
+    ).first()
+    
     if not edit_request:
-        raise HTTPException(status_code=404, detail="Edit request not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Edit request not found")
+    
+    return edit_request
 
-    edit_request.status = action
-    edit_request.response_message = response_message
-    edit_request.processed_at = datetime.utcnow()
-
+@router.post("/profile/{church_id}/edit-requests/{request_id}/approve", response_model=dict)
+def approve_edit_request(church_id: int, request_id: int, db: Session = None):
+    """Approve edit request (admin only)"""
+    if db is None:
+        db = SessionLocal()
+    
+    edit_request = db.query(EditRequest).filter(
+        EditRequest.id == request_id,
+        EditRequest.church_id == church_id
+    ).first()
+    
+    if not edit_request:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Edit request not found")
+    
+    if edit_request.status != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot approve request with status: {edit_request.status}"
+        )
+    
+    # Update church profile field
+    church = db.query(Church).filter(Church.id == church_id).first()
+    if hasattr(church, edit_request.field_name):
+        setattr(church, edit_request.field_name, edit_request.new_value)
+    
+    # Update request status
+    edit_request.status = "approved"
+    edit_request.responded_at = datetime.utcnow()
+    
     db.commit()
-
+    
     return {
-        "message": f"Edit request {action}ed successfully",
-        "request_id": request_id,
-        "status": action
+        "message": "Edit request approved",
+        "field": edit_request.field_name
     }
 
-
-# ============ Helper Functions ============
-def get_current_church(token: str):
-    """Verify JWT token and return church_id"""
-    from church_auth import get_current_church as auth_get_current_church
-    return auth_get_current_church(token)
-
-def get_current_admin(token: str):
-    """Verify JWT token and return admin_id"""
-    # TODO: Implement admin auth
-    pass
+@router.post("/profile/{church_id}/edit-requests/{request_id}/reject", response_model=dict)
+def reject_edit_request(church_id: int, request_id: int, reason: str | None = None, db: Session = None):
+    """Reject edit request (admin only)"""
+    if db is None:
+        db = SessionLocal()
+    
+    edit_request = db.query(EditRequest).filter(
+        EditRequest.id == request_id,
+        EditRequest.church_id == church_id
+    ).first()
+    
+    if not edit_request:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Edit request not found")
+    
+    if edit_request.status != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot reject request with status: {edit_request.status}"
+        )
+    
+    # Update request status
+    edit_request.status = "rejected"
+    edit_request.responded_at = datetime.utcnow()
+    
+    db.commit()
+    
+    return {
+        "message": "Edit request rejected",
+        "field": edit_request.field_name
+    }
