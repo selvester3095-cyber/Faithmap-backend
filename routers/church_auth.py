@@ -1,13 +1,13 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
 import jwt
 from datetime import datetime, timedelta
-from database import engine, SessionLocal
+from database import SessionLocal, get_db
 from models import Church
 
-router = APIRouter(prefix="/api/church", tags=["church-settings"])
+router = APIRouter(prefix="/api/church", tags=["church-auth"])
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -60,20 +60,10 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
 # ============== Routes ==============
 @router.post("/auth/register", response_model=dict)
-def register_church(request: ChurchRegisterRequest, db: Session = None):
+def register_church(request: ChurchRegisterRequest, db: Session = Depends(get_db)):
     """Register a new church"""
-    if db is None:
-        db = SessionLocal()
-    
     # Check if church already exists
     existing_church = db.query(Church).filter(Church.email == request.email).first()
     if existing_church:
@@ -106,11 +96,8 @@ def register_church(request: ChurchRegisterRequest, db: Session = None):
     }
 
 @router.post("/auth/login", response_model=dict)
-def login_church(request: ChurchLoginRequest, db: Session = None):
+def login_church(request: ChurchLoginRequest, db: Session = Depends(get_db)):
     """Login a church"""
-    if db is None:
-        db = SessionLocal()
-    
     # Find church by email
     church = db.query(Church).filter(Church.email == request.email).first()
     if not church or not verify_password(request.password, church.password_hash):
@@ -127,11 +114,8 @@ def login_church(request: ChurchLoginRequest, db: Session = None):
     }
 
 @router.post("/auth/change-password", response_model=dict)
-def change_password(request: ChurchChangePasswordRequest, church_id: int, db: Session = None):
+def change_password(church_id: int, request: ChurchChangePasswordRequest, db: Session = Depends(get_db)):
     """Change church password"""
-    if db is None:
-        db = SessionLocal()
-    
     # Find church
     church = db.query(Church).filter(Church.id == church_id).first()
     if not church:
