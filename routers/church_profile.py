@@ -1,8 +1,8 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from datetime import datetime
-from database import SessionLocal
+from database import get_db
 from models import Church, EditRequest
 
 router = APIRouter(prefix="/api/church", tags=["church-profile"])
@@ -19,7 +19,7 @@ class EditRequestResponse(BaseModel):
     field_name: str
     new_value: str
     reason: str | None
-    status: str  # pending, approved, rejected
+    status: str
     requested_at: datetime
     responded_at: datetime | None
 
@@ -39,21 +39,10 @@ class ChurchProfileResponse(BaseModel):
     class Config:
         from_attributes = True
 
-# ============== Helper Functions ==============
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
 # ============== Routes ==============
 @router.get("/profile/{church_id}", response_model=ChurchProfileResponse)
-def get_church_profile(church_id: int, db: Session = None):
+def get_church_profile(church_id: int, db: Session = Depends(get_db)):
     """Get church profile (read-only)"""
-    if db is None:
-        db = SessionLocal()
-    
     church = db.query(Church).filter(Church.id == church_id).first()
     if not church:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Church not found")
@@ -61,11 +50,8 @@ def get_church_profile(church_id: int, db: Session = None):
     return church
 
 @router.post("/profile/{church_id}/request-edit", response_model=dict)
-def request_edit(church_id: int, request: EditRequestCreate, db: Session = None):
+def request_edit(church_id: int, request: EditRequestCreate, db: Session = Depends(get_db)):
     """Request edit to church profile"""
-    if db is None:
-        db = SessionLocal()
-    
     # Verify church exists
     church = db.query(Church).filter(Church.id == church_id).first()
     if not church:
@@ -104,11 +90,8 @@ def request_edit(church_id: int, request: EditRequestCreate, db: Session = None)
     }
 
 @router.get("/profile/{church_id}/edit-requests", response_model=dict)
-def get_edit_requests(church_id: int, status_filter: str | None = None, db: Session = None):
+def get_edit_requests(church_id: int, status_filter: str | None = None, db: Session = Depends(get_db)):
     """Get edit requests for church"""
-    if db is None:
-        db = SessionLocal()
-    
     # Verify church exists
     church = db.query(Church).filter(Church.id == church_id).first()
     if not church:
@@ -127,11 +110,8 @@ def get_edit_requests(church_id: int, status_filter: str | None = None, db: Sess
     }
 
 @router.get("/profile/{church_id}/edit-requests/{request_id}", response_model=EditRequestResponse)
-def get_edit_request(church_id: int, request_id: int, db: Session = None):
+def get_edit_request(church_id: int, request_id: int, db: Session = Depends(get_db)):
     """Get specific edit request"""
-    if db is None:
-        db = SessionLocal()
-    
     edit_request = db.query(EditRequest).filter(
         EditRequest.id == request_id,
         EditRequest.church_id == church_id
@@ -143,11 +123,8 @@ def get_edit_request(church_id: int, request_id: int, db: Session = None):
     return edit_request
 
 @router.post("/profile/{church_id}/edit-requests/{request_id}/approve", response_model=dict)
-def approve_edit_request(church_id: int, request_id: int, db: Session = None):
+def approve_edit_request(church_id: int, request_id: int, db: Session = Depends(get_db)):
     """Approve edit request (admin only)"""
-    if db is None:
-        db = SessionLocal()
-    
     edit_request = db.query(EditRequest).filter(
         EditRequest.id == request_id,
         EditRequest.church_id == church_id
@@ -179,11 +156,8 @@ def approve_edit_request(church_id: int, request_id: int, db: Session = None):
     }
 
 @router.post("/profile/{church_id}/edit-requests/{request_id}/reject", response_model=dict)
-def reject_edit_request(church_id: int, request_id: int, reason: str | None = None, db: Session = None):
+def reject_edit_request(church_id: int, request_id: int, reason: str | None = None, db: Session = Depends(get_db)):
     """Reject edit request (admin only)"""
-    if db is None:
-        db = SessionLocal()
-    
     edit_request = db.query(EditRequest).filter(
         EditRequest.id == request_id,
         EditRequest.church_id == church_id
