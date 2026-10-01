@@ -1,7 +1,7 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from database import SessionLocal
+from database import get_db
 from models import ChurchSettings
 
 router = APIRouter(prefix="/api/church", tags=["church-settings"])
@@ -24,21 +24,10 @@ class NotificationPreferencesResponse(BaseModel):
     class Config:
         from_attributes = True
 
-# ============== Helper Functions ==============
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
 # ============== Routes ==============
 @router.get("/settings/{church_id}/notifications", response_model=NotificationPreferencesResponse)
-def get_notification_settings(church_id: int, db: Session = None):
+def get_notification_settings(church_id: int, db: Session = Depends(get_db)):
     """Get notification preferences for church"""
-    if db is None:
-        db = SessionLocal()
-    
     settings = db.query(ChurchSettings).filter(ChurchSettings.church_id == church_id).first()
     
     if not settings:
@@ -55,11 +44,8 @@ def get_notification_settings(church_id: int, db: Session = None):
     return settings
 
 @router.put("/settings/{church_id}/notifications", response_model=dict)
-def update_notification_settings(church_id: int, request: NotificationPreferences, db: Session = None):
+def update_notification_settings(church_id: int, request: NotificationPreferences, db: Session = Depends(get_db)):
     """Update notification preferences"""
-    if db is None:
-        db = SessionLocal()
-    
     # Validate reminder hours
     if request.reminder_hours_before < 1 or request.reminder_hours_before > 720:
         raise HTTPException(
@@ -99,11 +85,8 @@ def update_notification_settings(church_id: int, request: NotificationPreference
     }
 
 @router.post("/settings/{church_id}/notifications/reset", response_model=dict)
-def reset_notification_settings(church_id: int, db: Session = None):
+def reset_notification_settings(church_id: int, db: Session = Depends(get_db)):
     """Reset notification settings to defaults"""
-    if db is None:
-        db = SessionLocal()
-    
     settings = db.query(ChurchSettings).filter(ChurchSettings.church_id == church_id).first()
     
     if settings:
@@ -124,11 +107,8 @@ def reset_notification_settings(church_id: int, db: Session = None):
     }
 
 @router.get("/settings/{church_id}/all", response_model=dict)
-def get_all_settings(church_id: int, db: Session = None):
+def get_all_settings(church_id: int, db: Session = Depends(get_db)):
     """Get all church settings"""
-    if db is None:
-        db = SessionLocal()
-    
     settings = db.query(ChurchSettings).filter(ChurchSettings.church_id == church_id).first()
     
     if not settings:
