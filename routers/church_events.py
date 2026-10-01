@@ -1,9 +1,9 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from datetime import datetime
-from database import SessionLocal
-from models import Event
+from database import get_db
+from models import Event, Church
 
 router = APIRouter(prefix="/api/church", tags=["church-events"])
 
@@ -42,21 +42,10 @@ class EventResponse(BaseModel):
     class Config:
         from_attributes = True
 
-# ============== Helper Functions ==============
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
 # ============== Routes ==============
 @router.post("/events", response_model=dict)
-def create_event(church_id: int, request: EventCreate, db: Session = None):
+def create_event(church_id: int, request: EventCreate, db: Session = Depends(get_db)):
     """Create a new event"""
-    if db is None:
-        db = SessionLocal()
-    
     # Validate description length
     if request.description and len(request.description) > 100:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Description must be 100 characters or less")
@@ -87,11 +76,8 @@ def create_event(church_id: int, request: EventCreate, db: Session = None):
     }
 
 @router.get("/events/{event_id}", response_model=EventResponse)
-def get_event(event_id: int, db: Session = None):
+def get_event(event_id: int, db: Session = Depends(get_db)):
     """Get event by ID"""
-    if db is None:
-        db = SessionLocal()
-    
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
@@ -105,12 +91,9 @@ def list_events(
     limit: int = 10,
     search: str | None = None,
     sort_by: str = "created_at",
-    db: Session = None
+    db: Session = Depends(get_db)
 ):
     """List church events with pagination and search"""
-    if db is None:
-        db = SessionLocal()
-    
     query = db.query(Event).filter(Event.church_id == church_id)
     
     # Search by title
@@ -134,11 +117,8 @@ def list_events(
     }
 
 @router.put("/events/{event_id}", response_model=dict)
-def update_event(event_id: int, request: EventUpdate, db: Session = None):
+def update_event(event_id: int, request: EventUpdate, db: Session = Depends(get_db)):
     """Update event"""
-    if db is None:
-        db = SessionLocal()
-    
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
@@ -176,11 +156,8 @@ def update_event(event_id: int, request: EventUpdate, db: Session = None):
     return {"message": "Event updated successfully"}
 
 @router.delete("/events/{event_id}", response_model=dict)
-def delete_event(event_id: int, db: Session = None):
+def delete_event(event_id: int, db: Session = Depends(get_db)):
     """Delete event"""
-    if db is None:
-        db = SessionLocal()
-    
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
@@ -191,27 +168,20 @@ def delete_event(event_id: int, db: Session = None):
     return {"message": "Event deleted successfully"}
 
 @router.post("/events/{event_id}/interested", response_model=dict)
-def mark_interested(event_id: int, user_id: int, db: Session = None):
+def mark_interested(event_id: int, user_id: int, db: Session = Depends(get_db)):
     """Mark event as interested"""
-    if db is None:
-        db = SessionLocal()
-    
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
     
-    # Add user to interested list (simplified - in production use a junction table)
     event.interested_count += 1
     db.commit()
     
     return {"message": "Marked as interested"}
 
 @router.post("/events/{event_id}/publish", response_model=dict)
-def publish_event(event_id: int, db: Session = None):
+def publish_event(event_id: int, db: Session = Depends(get_db)):
     """Publish event"""
-    if db is None:
-        db = SessionLocal()
-    
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
